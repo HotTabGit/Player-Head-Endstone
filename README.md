@@ -4,7 +4,7 @@
 
 ## Установка
 
-1. Останови Endstone. Скачай [Player Heads 1.2.3](packages/endstone_player_heads-1.2.3-py3-none-any.whl) и положи файл в папку `plugins`.
+1. Останови Endstone. Скачай [Player Heads 1.2.3]([packages/endstone_player_heads-1.2.3-py3-none-any.whl](https://github.com/HotTabGit/Player-Head-Endstone/releases/download/v1.2.3/endstone_player_heads-1.2.3-py3-none-any.whl)) и положи файл в папку `plugins`.
 2. При обновлении убери старый `.whl`. Сохрани папку `plugins/player_heads` с ключом и данными голов.
 3. Запусти сервер. Настройки появятся в `plugins/player_heads/config.toml`.
 
