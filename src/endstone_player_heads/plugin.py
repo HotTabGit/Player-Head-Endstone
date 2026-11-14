@@ -19,6 +19,7 @@ from endstone.permissions import PermissionDefault
 from endstone.plugin import Plugin
 
 from .config import ConfigError, Settings, load_settings
+from .live_skin import LiveSkins
 from .model import NBT_KEY, HeadData, make_head_data, make_head_tag, read_head_nbt, head_display_name, head_lore, should_drop
 from .store import MAX_RECORDS, HeadStoreError, NbtHeadStore
 from .skins import SkinCatalogue, custom_type, is_custom_type, capture_failure, write_atomic, json_bytes
@@ -79,6 +80,7 @@ class PlayerHeadsPlugin(Plugin):
         super().__init__()
         self.ready = False
         self._settings = Settings()
+        self._live_skins = LiveSkins()
         self._key = None
         self._store = None
         self._undelivered = None
@@ -338,6 +340,7 @@ class PlayerHeadsPlugin(Plugin):
                 self.logger.info(f'PlayerHeads: загружено скинов голов: {len(self._skin_types)}; новые появятся после перезапуска.')
 
     def on_disable(self):
+        self._refresh_live_skins(clear=True)
         for position, pending in tuple(self._pending_explosions.items()):
             self._finish_exploded_head(position, pending, retry=False)
         self.ready = False
@@ -821,6 +824,16 @@ class PlayerHeadsPlugin(Plugin):
     def on_block_explode(self, event: BlockExplodeEvent):
         self._explosion(event)
 
+    def _refresh_live_skins(self, clear=False):
+        try:
+            if self._live_skins.visible and (clear or not self.ready or not self._settings.live_placed_skins):
+                for player in self.server.online_players:
+                    self._live_skins.clear(player)
+            elif not clear and self.ready and self._settings.live_placed_skins and self._skins is not None:
+                self._live_skins.update(self, _HEAD_BLOCKS, _type_name)
+        except Exception:
+            self._warn("не удалось обновить визуальные скины голов")
+
     def _maintenance(self):
         if not self._main() or self._store is None:
             return
@@ -868,9 +881,11 @@ class PlayerHeadsPlugin(Plugin):
         except Exception:
             self.ready = False
             self._warn("работа приостановлена: не удалось сохранить или проверить NBT-хранилище")
+        self._refresh_live_skins()
 
     @event_handler
     def on_quit(self, event: PlayerQuitEvent):
+        self._live_skins.forget(event.player)
         self._notices.pop(str(event.player.xuid), None)
         for key, request in tuple(self._skin_retries.items()):
             if request['xuid'] == str(event.player.xuid):

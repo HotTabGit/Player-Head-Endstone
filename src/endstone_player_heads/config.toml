@@ -10,3 +10,5 @@ pair_cooldown_seconds = 0
 # Обычная голова до подключения скина.
 item_type = "minecraft:player_head"
 item_data = 0
+# Бета: скины поставленных голов без рестарта.
+live_placed_skins = false

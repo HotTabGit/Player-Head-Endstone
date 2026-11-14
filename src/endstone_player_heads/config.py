@@ -19,6 +19,7 @@ class Settings:
     pair_cooldown_seconds: int = 0
     item_type: str = "minecraft:player_head"
     item_data: int = 0
+    live_placed_skins: bool = False
 
 
 def parse_settings(data: dict) -> Settings:
@@ -30,7 +31,7 @@ def parse_settings(data: dict) -> Settings:
         raise ConfigError("В разделе [heads] найдена неизвестная настройка.")
     values = {}
     defaults = Settings()
-    for key in ("enabled", "pvp_only"):
+    for key in ("enabled", "pvp_only", "live_placed_skins"):
         value = section.get(key, getattr(defaults, key))
         if type(value) is not bool:
             raise ConfigError(f"{key}: укажи true или false.")
