@@ -19,7 +19,7 @@ class Settings:
     pair_cooldown_seconds: int = 0
     item_type: str = "minecraft:player_head"
     item_data: int = 0
-    live_placed_skins: bool = True
+    live_placed_skins: bool = False
 
 
 def parse_settings(data: dict) -> Settings:
