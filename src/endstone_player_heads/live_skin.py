@@ -2,14 +2,14 @@ from functools import lru_cache
 from itertools import count
 import json
 import math
-from struct import pack
+from struct import pack, unpack
 from uuid import uuid4
 
 from .skins import SIZES, head_pixels
 
 
 PROTOCOL = 2225
-ADD_PLAYER, REMOVE_ACTOR, PLAYER_LIST = 12, 14, 63
+ADD_PLAYER, REMOVE_ACTOR, BLOCK_ACTOR_DATA, PLAYER_LIST = 12, 14, 56, 63
 DISTANCE, MAX_VISIBLE, MAX_NEW = 24, 12, 2
 
 
@@ -30,6 +30,70 @@ def field(value):
     if isinstance(value, str):
         value = value.encode()
     return unsigned(len(value)) + value
+
+
+def wire_uuid(value):
+    raw = value.bytes
+    return raw[:8][::-1] + raw[8:][::-1]
+
+
+class PacketReader:
+    def __init__(self, data):
+        self.data = data
+        self.offset = 0
+
+    def take(self, length):
+        end = self.offset + length
+        if end > len(self.data):
+            raise ValueError("truncated packet")
+        value = self.data[self.offset:end]
+        self.offset = end
+        return value
+
+    def unsigned(self, bits=32):
+        value = 0
+        for shift in range(0, bits, 7):
+            byte = self.take(1)[0]
+            value |= (byte & 127) << shift
+            if byte < 128 and value < 1 << bits:
+                return value
+        raise ValueError("invalid varint")
+
+    def signed(self, bits=32):
+        value = self.unsigned(bits)
+        return (value >> 1) ^ -(value & 1)
+
+    def blob(self):
+        return self.take(self.unsigned())
+
+
+def skull_rotation(payload):
+    reader = PacketReader(payload)
+    position = tuple(reader.signed() for _ in range(3))
+    if len(payload) > 512 or reader.take(1) != b"\x0a":
+        return None
+    reader.blob()
+    skull, degrees, legacy = False, None, None
+    while kind := reader.take(1)[0]:
+        name = reader.blob()
+        if kind == 8:
+            value = reader.blob()
+            if name == b"id":
+                skull = value == b"Skull"
+        elif kind in (3, 4):
+            reader.unsigned(32 if kind == 3 else 64)
+        elif kind in (1, 2, 5, 6):
+            value = reader.take({1: 1, 2: 2, 5: 4, 6: 8}[kind])
+            if kind == 5 and name == b"Rotation":
+                degrees = unpack("<f", value)[0]
+            if kind == 1 and name == b"Rot" and value[0] < 16:
+                legacy = value[0] * 22.5
+        else:
+            return None
+    rotation = degrees if degrees is not None else legacy
+    if skull and rotation is not None and math.isfinite(rotation) and reader.offset == len(payload):
+        return position, rotation % 360
+    return None
 
 
 def serialize_skin(key, width, height, pixels, version):
@@ -67,17 +131,19 @@ def remove_list_entry(identity):
 
 
 def avatar(identity, entity, xyz, yaw):
-    metadata = b"".join((b"\x04\x00\x07", signed(1 << 17),
-                        b"\x26\x03", pack("<f", 1.08),
-                        b"\x35\x03", pack("<f", 0.001),
-                        b"\x36\x03", pack("<f", 0.001)))
+    entries = ((0, 7, signed(1 << 17)), (38, 3, pack("<f", 1.08)),
+               (53, 3, pack("<f", 0.001)), (54, 3, pack("<f", 0.001)))
+    metadata = unsigned(len(entries)) + b"".join(
+        unsigned(key) + unsigned(kind) + bytes((kind,)) + value
+        for key, kind, value in entries
+    )
     abilities = pack("<qBBBHIIfff", entity, 1, 0, 1, 1, 0, 0, 0.05, 1, 0.1)
     return b"".join((identity, b"\0", unsigned(entity), b"\0",
                      pack("<9f", *xyz, 0, 0, 0, 0, yaw, yaw), bytes(9), metadata,
                      bytes(2), abilities, bytes(3), pack("<i", -1)))
 
 
-def appearance(position, states):
+def appearance(position, states, rotation=None):
     _, x, y, z = position
     face = states.get("minecraft:block_face", {2: "north", 3: "south", 4: "west", 5: "east"}
                       .get(states.get("facing_direction"), "up"))
@@ -86,14 +152,16 @@ def appearance(position, states):
     if face in offsets:
         dx, dy, dz, yaw = offsets[face]
         return (x + .5 + dx, y + dy, z + .5 + dz), yaw
-    rotation = states.get("ground_sign_direction", 0)
-    return (x + .5, y + (.5 if face == "down" else 0), z + .5), (180 + rotation * 22.5) % 360
+    if rotation is None:
+        rotation = states.get("ground_sign_direction", 0) * 22.5
+    return (x + .5, y + (.5 if face == "down" else 0), z + .5), (180 + rotation) % 360
 
 
 class LiveSkins:
     def __init__(self):
         self.visible = {}
         self.ids = count(1 << 52)
+        self.rotations = {}
 
     def forget(self, player):
         if self.visible:
@@ -115,11 +183,15 @@ class LiveSkins:
         if plugin.server.protocol_version != PROTOCOL:
             return
         candidates = {}
+        registered = {}
         for position, data in plugin._store.items():
             key = plugin._skins.key_for(data)
+            registered[position] = data.head_id
             if key is not None:
                 dimension, x, _, z = position
                 candidates.setdefault((dimension, x >> 4, z >> 4), []).append((position, key))
+        self.rotations = {position: value for position, value in self.rotations.items()
+                          if registered.get(position) == value[0]}
         loaded = {}
         for player in plugin.server.online_players:
             where = player.location
@@ -143,7 +215,8 @@ class LiveSkins:
                 block = dim.get_block_at(*position[1:])
                 if position in plugin._pending_explosions or block is None or type_name(block) not in vanilla:
                     continue
-                desired[position] = (key, *appearance(position, block.data.block_states))
+                _, rotation = self.rotations.get(position, (None, None))
+                desired[position] = (key, *appearance(position, block.data.block_states, rotation))
                 if len(desired) >= MAX_VISIBLE:
                     break
             self.reconcile(player, plugin._skins, desired)
@@ -158,8 +231,7 @@ class LiveSkins:
         for position, state in pending[:MAX_NEW]:
             key, xyz, yaw = state
             skin = self.skin_bytes(skins, key, player.game_version)
-            token = uuid4().bytes
-            identity = token[:8][::-1] + token[8:][::-1]
+            identity = wire_uuid(uuid4())
             entity = next(self.ids)
             player.send_packet(PLAYER_LIST, add_list_entry(identity, entity, skin))
             try:
