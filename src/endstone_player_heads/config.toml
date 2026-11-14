@@ -11,4 +11,4 @@ pair_cooldown_seconds = 0
 item_type = "minecraft:player_head"
 item_data = 0
 # Бета: скины поставленных голов без рестарта.
-live_placed_skins = false
+live_placed_skins = true
