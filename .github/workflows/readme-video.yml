@@ -1,0 +1,24 @@
+name: Upload README demo
+on:
+  push:
+    branches: [docs/readme-video]
+    paths: [.github/workflows/readme-video.yml]
+permissions:
+  contents: write
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload demo attachment
+        env:
+          DEMO_UPLOAD_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail --silent --show-error --location --output /tmp/player-heads-demo.mp4 'https://github.com/HotTabGit/Animated-Phone-Wallpapers-/raw/refs/heads/main/Video%20Project%206.mp4'
+          curl --fail-with-body --silent --show-error --request POST \
+            --header "Authorization: Bearer $DEMO_UPLOAD_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'Content-Type: application/octet-stream' \
+            --data-binary @/tmp/player-heads-demo.mp4 \
+            'https://uploads.github.com/user-attachments/assets?name=player-heads-demo.mp4&content_type=video%2Fmp4&repository_id=1457883020' \
+            --output /tmp/attachment.json || { jq -r '.message' /tmp/attachment.json; exit 1; }
+          jq -er '.url | select(startswith("https://github.com/user-attachments/assets/"))' /tmp/attachment.json
