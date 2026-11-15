@@ -9,12 +9,15 @@ from endstone_player_heads.config import ConfigError, Settings, load_settings, p
 
 
 class ConfigTests(unittest.TestCase):
-    def test_shipped_config_has_enabled_full_chance_pvp_defaults(self):
+    def test_shipped_config_enables_live_skins_by_default(self):
         shipped = Path(__file__).resolve().parents[1] / "src" / "endstone_player_heads" / "config.toml"
         self.assertEqual(load_settings(shipped), Settings())
+        self.assertTrue(load_settings(shipped).live_placed_skins)
 
     def test_empty_config_uses_defaults(self):
         self.assertEqual(parse_settings({}), Settings())
+        self.assertTrue(parse_settings({}).live_placed_skins)
+        self.assertFalse(parse_settings({"heads": {"live_placed_skins": False}}).live_placed_skins)
 
     def test_fractional_chance_and_explicit_zero_cooldown(self):
         settings = parse_settings({"heads": {"drop_chance_percent": 12.5, "pair_cooldown_seconds": 0,
