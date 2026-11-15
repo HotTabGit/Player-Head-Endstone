@@ -1,0 +1,38 @@
+name: Publish Player Heads 1.3.0
+on:
+  push:
+    branches: [main]
+    paths: [pyproject.toml, .github/workflows/release.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s tests
+      - run: python -m pip install build
+      - run: python -m build --wheel
+      - name: Publish and verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          [ "$version" = "1.3.0" ] || exit 0
+          if gh release view "v$version" >/dev/null 2>&1; then
+            exit 0
+          fi
+          asset="endstone_player_heads-$version-py3-none-any.whl"
+          cat > /tmp/player-heads-notes.md <<'EOF'
+          Скины поставленных голов появляются сразу. Поддерживаются два слоя на скинах 64×64 и 128×128.
+
+          Endstone 0.11.15, Bedrock 26.60. Положи .whl в plugins и перезапусти сервер. При обновлении сохрани plugins/player_heads.
+          EOF
+          gh release create "v$version" "dist/$asset" --target "$GITHUB_SHA" --title "Player Heads $version" --latest --notes-file /tmp/player-heads-notes.md
+          gh release download "v$version" --pattern "$asset" --dir /tmp/verified-heads
+          cmp "dist/$asset" "/tmp/verified-heads/$asset"
