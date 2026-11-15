@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -11,7 +12,7 @@ from endstone.block import BlockFace
 from endstone.event import (
     ActorExplodeEvent, BlockBreakEvent, BlockExplodeEvent, BlockPlaceEvent,
     BlockPistonExtendEvent, BlockPistonRetractEvent, EventPriority,
-    PlayerDeathEvent, PlayerQuitEvent, PlayerJoinEvent, PlayerSkinChangeEvent, event_handler,
+    PacketSendEvent, PlayerDeathEvent, PlayerQuitEvent, PlayerJoinEvent, PlayerSkinChangeEvent, event_handler,
 )
 from endstone.inventory import ItemStack
 from endstone.level import Location
@@ -19,9 +20,11 @@ from endstone.permissions import PermissionDefault
 from endstone.plugin import Plugin
 
 from .config import ConfigError, Settings, load_settings
+from .live_skin import BLOCK_ACTOR_DATA, PLAYER_LIST, PROTOCOL, LiveSkins, skull_rotation, wire_uuid
 from .model import NBT_KEY, HeadData, make_head_data, make_head_tag, read_head_nbt, head_display_name, head_lore, should_drop
 from .store import MAX_RECORDS, HeadStoreError, NbtHeadStore
-from .skins import SkinCatalogue, custom_type, is_custom_type, capture_failure, write_atomic, json_bytes
+from .skins import LIVE_HEAD, SkinCatalogue, custom_type, is_custom_type, capture_failure, write_atomic, json_bytes
+from .worn_skin import WornSkins
 
 
 _FACES = {
@@ -42,7 +45,7 @@ def _support_offset(states):
 
 
 def _head_kind(kind):
-    return kind in _HEAD_BLOCKS or is_custom_type(kind)
+    return kind in _HEAD_BLOCKS or kind == LIVE_HEAD or is_custom_type(kind)
 
 
 def _type_name(value) -> str:
@@ -79,6 +82,8 @@ class PlayerHeadsPlugin(Plugin):
         super().__init__()
         self.ready = False
         self._settings = Settings()
+        self._live_skins = LiveSkins()
+        self._worn_skins = WornSkins()
         self._key = None
         self._store = None
         self._undelivered = None
@@ -98,6 +103,7 @@ class PlayerHeadsPlugin(Plugin):
         self._drops = 0
         self._skins = None
         self._skin_types = frozenset()
+        self._live_item_registered = False
         self._skin_diagnostics = {'attempts': 0, 'successes': 0, 'failures': {}}
         self._skin_diag_dirty = False
         self._skin_diag_last_write = -60.0
@@ -202,7 +208,7 @@ class PlayerHeadsPlugin(Plugin):
         return kind if kind in self._skin_types else None
 
     def _upgrade_inventory_heads(self):
-        if not self._skin_types:
+        if not self._skin_types and not self._live_item_registered:
             return
         players = list(self.server.online_players)
         if not players:
@@ -215,23 +221,38 @@ class PlayerHeadsPlugin(Plugin):
         if find_session(player) is not None:
             return
         inventory = player.inventory
-        for slot in range(min(inventory.size, 64)):
-            item = inventory.get_item(slot)
+        def replacement_for(item):
             data = self._item_data(item)
-            if data is None:
-                continue
+            if data is None or item.amount != 1:
+                return None
+            kind = _type_name(item)
             target = self._skin_type(data)
-            if target is None or _type_name(item) == target or item.amount != 1:
-                continue
-            replacement = ItemStack(target, item.amount)
+            if kind == LIVE_HEAD:
+                target = target or self._settings.item_type
+            if target is None or target == kind:
+                return None
+            replacement = ItemStack(target, item.amount, self._settings.item_data if target == self._settings.item_type else 0)
             replacement.nbt = item.nbt
             if not replacement.set_item_meta(item.item_meta):
                 raise RuntimeError('skin_upgrade_metadata_rejected')
             if self._item_data(replacement) != data:
                 raise RuntimeError('skin_upgrade_identity_changed')
-            inventory.set_item(slot, replacement)
+            return replacement
+
+        for slot in range(min(inventory.size, 64)):
+            replacement = replacement_for(inventory.get_item(slot))
+            if replacement is not None:
+                inventory.set_item(slot, replacement)
+        for equipment_slot in ('helmet', 'item_in_off_hand'):
+            item = getattr(inventory, equipment_slot, None)
+            if item is not None and _type_name(item) == LIVE_HEAD:
+                replacement = replacement_for(item)
+                if replacement is not None:
+                    setattr(inventory, equipment_slot, replacement)
 
     def _upgrade_placed_head(self, block, data):
+        if self._settings.live_placed_skins and getattr(self.server, "protocol_version", None) == PROTOCOL:
+            return
         target = self._skin_type(data)
         if target is None or _type_name(block) == target:
             return
@@ -261,6 +282,8 @@ class PlayerHeadsPlugin(Plugin):
     def on_skin_change(self, event: PlayerSkinChangeEvent):
         if self.ready and self._main() and not event.is_cancelled:
             self._capture_skin(event.player, skin=event.new_skin, context='skin_change')
+            if getattr(self.server, "protocol_version", None) == PROTOCOL:
+                self._worn_skins.skin_changed(event.player)
 
     def _main(self):
         return threading.get_ident() == self._main_thread
@@ -323,6 +346,7 @@ class PlayerHeadsPlugin(Plugin):
                 try:
                     from endstone.inventory import ItemType
                     registry = self.server.get_registry(ItemType)
+                    self._live_item_registered = registry.get(LIVE_HEAD) is not None
                     self._skin_types = frozenset(custom_type(key) for key in self._skins.startup_keys
                                                  if registry.get(custom_type(key)) is not None)
                 except Exception as exc:
@@ -338,6 +362,7 @@ class PlayerHeadsPlugin(Plugin):
                 self.logger.info(f'PlayerHeads: загружено скинов голов: {len(self._skin_types)}; новые появятся после перезапуска.')
 
     def on_disable(self):
+        self._refresh_live_skins(clear=True)
         for position, pending in tuple(self._pending_explosions.items()):
             self._finish_exploded_head(position, pending, retry=False)
         self.ready = False
@@ -530,6 +555,8 @@ class PlayerHeadsPlugin(Plugin):
             token = approval[0] if approval is not None else object()
             self._pending_placements[position] = token
             dimension = event.block.dimension
+            yaw = getattr(event.player.location, "yaw", 0.0)
+            rotation = (math.floor(yaw / 22.5 + .5) % 16) * 22.5
 
             def finish():
                 if not self.ready or self._pending_placements.get(position) is not token:
@@ -540,6 +567,9 @@ class PlayerHeadsPlugin(Plugin):
                     block = dimension.get_block_at(*position[1:])
                     if data is not None and _head_kind(_type_name(block)):
                         self._store.set(position, data)
+                        previous = self._live_skins.rotations.get(position)
+                        if previous is None or previous[0] != data.head_id:
+                            self._live_skins.rotations[position] = (data.head_id, rotation)
                     elif self._store.get(position) is not None:
                         self._store.pop(position)
                 except Exception:
@@ -821,6 +851,44 @@ class PlayerHeadsPlugin(Plugin):
     def on_block_explode(self, event: BlockExplodeEvent):
         self._explosion(event)
 
+    def _refresh_live_skins(self, clear=False):
+        try:
+            if self._live_skins.visible and (clear or not self.ready or not self._settings.live_placed_skins):
+                for player in self.server.online_players:
+                    self._live_skins.clear(player)
+            elif not clear and self.ready and self._settings.live_placed_skins and self._skins is not None:
+                self._live_skins.update(self, _HEAD_BLOCKS, _type_name)
+        except Exception:
+            self._warn("не удалось обновить визуальные скины голов")
+        if getattr(self.server, "protocol_version", None) == PROTOCOL:
+            try:
+                self._worn_skins.update(self, not clear and self.ready and self._skins is not None
+                                        and self._settings.live_placed_skins)
+            except (AttributeError, OSError, RuntimeError, ValueError):
+                self._warn("не удалось обновить скин надетой головы")
+
+    @event_handler(priority=EventPriority.MONITOR, ignore_cancelled=True)
+    def on_head_packet(self, event: PacketSendEvent):
+        if event.packet_id not in (BLOCK_ACTOR_DATA, PLAYER_LIST) or not self._main() or not self.ready:
+            return
+        if self.server.protocol_version != PROTOCOL or event.player is None:
+            return
+        try:
+            if event.packet_id == PLAYER_LIST:
+                self._worn_skins.observe(wire_uuid(event.player.unique_id), event.payload)
+                return
+            result = skull_rotation(event.payload)
+            if result is None:
+                return
+            coordinates, rotation = result
+            position = (event.player.dimension.name, *coordinates)
+            approval = self._placement_approvals.get(position)
+            data = approval[1] if approval is not None else self._store.get(position)
+            if data is not None:
+                self._live_skins.rotations[position] = (data.head_id, rotation)
+        except (RuntimeError, ValueError):
+            return
+
     def _maintenance(self):
         if not self._main() or self._store is None:
             return
@@ -868,9 +936,13 @@ class PlayerHeadsPlugin(Plugin):
         except Exception:
             self.ready = False
             self._warn("работа приостановлена: не удалось сохранить или проверить NBT-хранилище")
+        self._refresh_live_skins()
 
     @event_handler
     def on_quit(self, event: PlayerQuitEvent):
+        self._live_skins.forget(event.player)
+        if getattr(self.server, "protocol_version", None) == PROTOCOL:
+            self._worn_skins.forget(event.player)
         self._notices.pop(str(event.player.xuid), None)
         for key, request in tuple(self._skin_retries.items()):
             if request['xuid'] == str(event.player.xuid):
@@ -902,6 +974,9 @@ class PlayerHeadsPlugin(Plugin):
                                 f"Выпадение: {'вкл' if self._settings.enabled else 'выкл'}, "
                                 f"шанс: {self._settings.drop_chance_percent:g}%, установлено: {count}.")
             sender.send_message(f'§7Скины: зарегистрировано {len(self._skin_types)}; новые снимки применяются после перезапуска.')
+            sender.send_message(f'§7Надетые головы: отправлено обновлений скина {self._worn_skins.updates}.')
+            if self._settings.live_placed_skins and getattr(self.server, "protocol_version", None) == PROTOCOL:
+                sender.send_message(f'§7Предмет для свежих скинов: {"зарегистрирован" if self._live_item_registered else "недоступен"}.')
             return True
         if action == "reload" and len(args) == 1:
             try:
