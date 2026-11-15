@@ -5,8 +5,10 @@ enabled = true
 pvp_only = true
 # Шанс выпадения, 0–100%.
 drop_chance_percent = 100
-# Пауза для той же пары, 0 — без паузы.
+# Пауза для той же пары. 0 отключает паузу.
 pair_cooldown_seconds = 0
 # Обычная голова до подключения скина.
 item_type = "minecraft:player_head"
 item_data = 0
+# Скины поставленных голов без перезапуска.
+live_placed_skins = true
