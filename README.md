@@ -2,6 +2,10 @@
 
 За убийство игрока выпадает его голова. Её можно поставить или надеть.
 
+## Видео
+
+[![Смотреть демонстрацию Player Heads](https://i.ytimg.com/vi/rHFu__9gN-M/hqdefault.jpg)](https://youtu.be/rHFu__9gN-M)
+
 ## Установка
 
 1. Останови сервер и положи [Player Heads 1.3.0](https://github.com/HotTabGit/Player-Head-Endstone/releases/download/v1.3.0/endstone_player_heads-1.3.0-py3-none-any.whl) в `plugins`.
