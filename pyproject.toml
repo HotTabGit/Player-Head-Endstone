@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "endstone-player-heads"
-version = "1.2.3"
+version = "1.3.0"
 description = "Головы игроков со скинами для Endstone"
 requires-python = ">=3.11"
 dependencies = []
@@ -19,4 +19,3 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 endstone_player_heads = ["config.toml"]
-
