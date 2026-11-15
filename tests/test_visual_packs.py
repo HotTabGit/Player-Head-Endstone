@@ -47,11 +47,14 @@ class VisualPackTests(unittest.TestCase):
                 self.assertNotEqual(block['description']['identifier'], worn['description']['identifier'])
                 self.assertEqual(worn['bones'][0]['name'], 'head')
                 self.assertEqual(worn['bones'][0]['pivot'], [0, 24, 0])
-                for cube, base in zip(worn['bones'][0]['cubes'], block['bones'][0]['cubes']):
+                self.assertEqual(worn['bones'][1]['parent'], 'head')
+                for worn_bone, block_bone in zip(worn['bones'], block['bones']):
+                    cube, base = worn_bone['cubes'][0], block_bone['cubes'][0]
                     self.assertEqual(cube['origin'], [-4, 24, -4])
                     self.assertEqual(cube['uv'], base['uv'])
                     self.assertGreater(cube['inflate'], base.get('inflate', 0))
-                for cube in worn['bones'][0]['cubes']:
+                for bone in worn['bones']:
+                    cube = bone['cubes'][0]
                     for face in cube['uv'].values():
                         self.assertLessEqual(sum((face['uv'][0], face['uv_size'][0])), width)
                         self.assertLessEqual(sum((face['uv'][1], face['uv_size'][1])), height)
@@ -83,6 +86,12 @@ class VisualPackTests(unittest.TestCase):
             self.assertEqual(item['description']['identifier'], block['description']['identifier'])
             self.assertEqual(attachable['identifier'], item['description']['identifier'])
             self.assertEqual(attachable['geometry']['default'], worn['description']['identifier'])
+            block_geometry = load(rp / 'models/blocks/head_64_64.geo.json')['minecraft:geometry'][0]
+            hat = block_geometry['bones'][1]
+            self.assertEqual(hat['parent'], 'head')
+            self.assertEqual(hat['cubes'][0]['uv']['north']['uv'], [40, 8])
+            materials = block['components']['minecraft:material_instances']
+            self.assertEqual({entry['render_method'] for entry in materials.values()}, {'blend'})
             self.assertTrue((rp / (attachable['textures']['default'] + '.png')).is_file())
             controllers = load(rp / 'render_controllers/head_worn.json')['render_controllers']
             self.assertTrue(set(attachable['render_controllers']) <= set(controllers))
