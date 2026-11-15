@@ -5,6 +5,7 @@ import threading
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
+from uuid import UUID
 
 from test_plugin import ADAPTER, FakePlayer, FakeDimension, FakeEvent
 from test_skins import Image
@@ -22,7 +23,7 @@ class CaptureTests(unittest.TestCase):
         self.plugin.ready = True
         self.plugin._main_thread = threading.get_ident()
         self.player = FakePlayer(FakeDimension(), name='PrivateName')
-        self.player.unique_id = 'unique-runtime-player'
+        self.player.unique_id = UUID(int=1)
         self.player.runtime_id = 1
         self.player.skin = NS(image=Image(width=0, height=0))
         self.plugin.server = NS(online_mode=True, online_players=[self.player])

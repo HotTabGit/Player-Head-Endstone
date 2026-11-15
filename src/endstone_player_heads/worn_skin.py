@@ -2,12 +2,50 @@ from functools import lru_cache
 from hashlib import sha256
 import json
 from struct import pack, unpack
+from threading import Lock
+from time import monotonic
 
 from .live_skin import PLAYER_LIST, PacketReader, field, signed, unsigned, wire_uuid
 from .skins import LIVE_HEAD, SIZES, image_snapshot
+from .skin_snapshot import read_skin_visuals, snapshot_from_visuals
 
 
-def roster_entries(payload):
+def skin_flags(reader):
+    for _ in range(4):
+        reader.blob()
+    reader.take(5)
+    pieces = reader.unsigned()
+    if pieces > 256:
+        raise ValueError("oversize persona")
+    for _ in range(pieces):
+        reader.blob()
+        reader.take(21)
+        reader.blob()
+    tints = reader.unsigned()
+    if tints > 256:
+        raise ValueError("oversize persona tints")
+    for _ in range(tints):
+        reader.blob()
+        reader.take(16)
+    flags = reader.take(5)
+    reader.blob()
+    reader.blob()
+    return pieces, tints, flags[1]
+
+
+def changed_skin(payload):
+    reader = PacketReader(payload)
+    identity = reader.take(16)
+    visuals = read_skin_visuals(reader)
+    _, _, persona = skin_flags(reader)
+    reader.blob()
+    reader.blob()
+    if reader.offset != len(payload):
+        raise ValueError("trailing skin data")
+    return identity, visuals, persona
+
+
+def roster_entries(payload, updates=None):
     reader = PacketReader(payload)
     count = reader.unsigned()
     if count > 128:
@@ -27,43 +65,14 @@ def roster_entries(payload):
             reader.blob()
         reader.take(4)
         skin_start = reader.offset
-        skin_id = reader.blob()
-        reader.blob()
-        reader.take(8)
-        reader.blob()
-        animations = reader.unsigned()
-        if animations > 64:
-            raise ValueError("oversize animations")
-        for _ in range(animations):
-            reader.take(8)
-            reader.blob()
-            reader.unsigned()
-            reader.take(4)
-            reader.unsigned()
-        reader.take(8)
-        for _ in range(6):
-            reader.blob()
-        reader.take(5)
-        pieces = reader.unsigned()
-        if pieces > 256:
-            raise ValueError("oversize persona")
-        for _ in range(pieces):
-            reader.blob()
-            reader.take(21)
-            reader.blob()
-        tints = reader.unsigned()
-        if tints > 256:
-            raise ValueError("oversize persona tints")
-        for _ in range(tints):
-            reader.blob()
-            reader.take(16)
-        flags = reader.take(5)
-        reader.blob()
-        reader.blob()
+        visuals = read_skin_visuals(reader)
+        pieces, tints, persona = skin_flags(reader)
         reader.take(7)
-        if skin_id.startswith(b"kmheads:"):
+        if visuals[0].startswith(b"kmheads:"):
             continue
-        classic = not (animations or pieces or tints or flags[1])
+        if updates is not None:
+            updates.append((identity, visuals, persona))
+        classic = not (visuals[5] or pieces or tints or persona)
         if classic:
             entries.append((identity, (payload[start:reader.offset], skin_start - start)))
         else:
@@ -142,11 +151,58 @@ class WornSkins:
         self.sending = False
         self.updates = 0
         self.revision = 0
+        self.snapshots = {}
+        self.pending = {}
+        self.pending_lock = Lock()
+
+    def queue_change(self, payload, address):
+        if not 16 <= len(payload) <= 512 * 1024:
+            return
+        identity = payload[:16]
+        key = (identity, address)
+        with self.pending_lock:
+            if key not in self.pending and len(self.pending) >= 16:
+                self.pending.pop(next(iter(self.pending)))
+            self.pending[key] = (monotonic(), bytes(payload))
+
+    def accept_pending(self, identity, address):
+        with self.pending_lock:
+            item = self.pending.pop((identity, address), None)
+        if item is None or monotonic() - item[0] > 5:
+            return None
+        try:
+            packet = changed_skin(item[1])
+            self.remember_snapshot(*packet)
+        except ValueError:
+            return None
+        return packet
+
+    def remember_snapshot(self, identity, visuals, persona):
+        if not (persona or visuals[6]):
+            self.snapshots.pop(identity, None)
+            return
+        if identity not in self.snapshots and len(self.snapshots) >= 128:
+            self.snapshots.pop(next(iter(self.snapshots)))
+        fingerprint = sha256(repr(persona).encode() + visuals[0] + sha256(visuals[4]).digest()
+                             + sha256(visuals[7]).digest() + sha256(visuals[1]).digest()
+                             + b"".join(sha256(frame[1]).digest() + pack("<IIf", *frame[0], frame[2])
+                                         for frame in visuals[6])).digest()
+        previous = self.snapshots.get(identity)
+        if previous is None or previous[0] != fingerprint:
+            self.snapshots[identity] = (fingerprint, snapshot_from_visuals(visuals, persona))
+
+    def observe_change(self, payload):
+        if len(payload) <= 4 * 1024 * 1024:
+            self.remember_snapshot(*changed_skin(payload))
 
     def observe(self, viewer, payload):
         if self.sending or len(payload) > 4 * 1024 * 1024:
             return
-        for identity, entry in roster_entries(payload):
+        snapshots = []
+        entries = roster_entries(payload, snapshots)
+        for identity, visuals, persona in snapshots:
+            self.remember_snapshot(identity, visuals, persona)
+        for identity, entry in entries:
             pair = (viewer, identity)
             if entry is None:
                 self.roster.pop(pair, None)
@@ -157,6 +213,7 @@ class WornSkins:
 
     def forget(self, player):
         identity = wire_uuid(player.unique_id)
+        self.snapshots.pop(identity, None)
         self.local_roster.pop(identity, None)
         for records in (self.roster, self.applied):
             for pair in tuple(records):
@@ -226,7 +283,7 @@ class WornSkins:
             entry = restore_entry(original, self.revision) if key is None else None
             if key is not None:
                 info = plugin._skins.index["skins"][key]
-                skin = plugin._skins.read_pixels(key)
+                skin = plugin._skins.render_pixels(key)
                 entry = merged_entry(original, info["width"], skin, self.revision)
                 if entry is None:
                     continue

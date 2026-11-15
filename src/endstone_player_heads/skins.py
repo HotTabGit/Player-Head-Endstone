@@ -16,7 +16,7 @@ RP_UUID = 'ec88c1a7-7606-4324-a11d-182e81c06a29'
 BP_MODULE = '76745b77-d288-4a8c-956b-319775ff9640'
 RP_MODULE = '7f743eb9-fc27-4669-8bc2-56095394581c'
 PACK_NAME = 'kartexmine_player_heads'
-PACK_ASSET_REVISION = 6
+PACK_ASSET_REVISION = 11
 LIVE_HEAD = 'kartexheads:live_head'
 MAX_SKINS = 512
 MAX_HEADS = 8192
@@ -113,12 +113,12 @@ def png_rgba(width, height, pixels):
             + chunk(b'IDAT', zlib.compress(scanlines, 9)) + chunk(b'IEND', b''))
 
 
-def image_snapshot(image):
+def image_snapshot(image, allow_placeholder=False):
     shape = tuple(image.shape)
     if len(shape) != 3 or shape[2] != 4 or str(image.dtype) != 'uint8':
         raise ValueError('skin_requires_uint8_rgba')
     height, width, _ = shape
-    if (width, height) not in SIZES:
+    if (width, height) not in SIZES and not (allow_placeholder and (width, height) == (1, 1)):
         raise ValueError('invalid_skin_image')
     raw = image.tobytes(order='C')
     if type(raw) is not bytes or len(raw) != width * height * 4:
@@ -130,6 +130,50 @@ def head_pixels(width, height, raw):
     stride = width * 4
     head_height = 16 * (width // 64)
     return raw[:stride * head_height].ljust(stride * height, b'\0')
+
+
+def classic_head_atlas(width, raw):
+    if width != 256:
+        return True
+    side = front = 0
+    for y in range(32, 64):
+        row = y * width * 4
+        side += sum(a != 0 for a in raw[row + 3:row + 128:4])
+        front += sum(a != 0 for a in raw[row + 131:row + 256:4])
+    return side != 0 or front >= 512
+
+
+def remap_head_atlas(raw, origin):
+    x, y = origin
+    result = bytearray(256 * 256 * 4)
+    for dx, dy, length in ((8, 0, 16), (0, 8, 32)):
+        for row in range(8):
+            source = ((y + dy + row) * 256 + x + dx) * 4
+            line = raw[source:source + length * 4]
+            if not all(line[3::4]):
+                raise ValueError('incomplete_persona_head')
+            line = b''.join(line[i:i + 4] * 4 for i in range(0, len(line), 4))
+            for repeat in range(4):
+                target = (((dy + row) * 4 + repeat) * 256 + dx * 4) * 4
+                result[target:target + len(line)] = line
+    return bytes(result)
+
+
+def matches_padded_persona_head(raw):
+    stride = 256 * 4
+    for y in range(9):
+        offset = y * stride
+        alpha = raw[offset + 3:offset + 34 * 4:4]
+        if alpha != bytes(9) + b'\xff' * 16 + bytes(9):
+            return False
+    if raw[9 * 4:25 * 4] != raw[stride + 9 * 4:stride + 25 * 4]:
+        return False
+    for y in range(9, 17):
+        offset = y * stride
+        row = raw[offset:offset + 34 * 4]
+        if row[3::4] != b'\xff' * 34 or row[:4] != row[4:8] or row[-4:] != row[-8:-4]:
+            return False
+    return not any(raw[17 * stride + 3:17 * stride + 34 * 4:4])
 
 
 def image_metadata(image):
@@ -162,13 +206,19 @@ def geometry_document(width, height):
     def uv(offset):
         points = {'north': (8 + offset, 8), 'south': (24 + offset, 8),
                   'east': (0 + offset, 8), 'west': (16 + offset, 8),
-                  'up': (8 + offset, 0), 'down': (16 + offset, 0)}
-        return {face: {'uv': [x * scale, y * scale], 'uv_size': [8 * scale, 8 * scale]}
-                for face, (x, y) in points.items()}
-    return {'format_version': '1.12.0', 'minecraft:geometry': [{
+                  'up': (8 + offset, 0)}
+        faces = {face: {'uv': [x * scale, y * scale], 'uv_size': [8 * scale, 8 * scale]}
+                 for face, (x, y) in points.items()}
+        faces['down'] = {'uv': [(24 + offset) * scale, 8 * scale],
+                         'uv_size': [-8 * scale, -8 * scale]}
+        return faces
+    return {'format_version': '1.21.130', 'minecraft:geometry': [{
         'description': {'identifier': f'geometry.kartexheads.head_{width}_{height}',
                         'texture_width': width, 'texture_height': height,
                         'visible_bounds_width': 2, 'visible_bounds_height': 2, 'visible_bounds_offset': [0, .5, 0]},
+        'item_display_transforms': {'gui': {'rotation': [30, 225, 0],
+                                            'translation': [0, 2, 0],
+                                            'scale': [.88, .88, .88], 'fit_to_frame': False}},
         'bones': [
             {'name': 'head', 'pivot': [0, 4, 0], 'cubes': [
                 {'origin': [-4, 0, -4], 'size': [8, 8, 8], 'uv': uv(0)}]},
@@ -229,6 +279,7 @@ def live_item_document():
 def wearable_geometry_document(width, height):
     document = geometry_document(width, height)
     geometry = document['minecraft:geometry'][0]
+    del geometry['item_display_transforms']
     geometry['description'].update({
         'identifier': f'geometry.kartexheads.worn_{width}_{height}',
         'visible_bounds_height': 3, 'visible_bounds_offset': [0, 1, 0]})
@@ -255,6 +306,17 @@ def attachable_document(key, width, height):
 class SkinCatalogue:
     def __init__(self, folder):
         self.folder = safe_path(Path(folder) / 'skins')
+        self._persona_origins = {}
+        overrides = safe_path(self.folder / 'persona-atlases.json')
+        if overrides.is_file() and overrides.stat().st_size <= 4096:
+            entries = decode_skin_json(overrides.read_bytes(), 'plugins/player_heads/skins/persona-atlases.json')
+            if isinstance(entries, dict):
+                self._persona_origins = {
+                    key: origin for key, origin in entries.items()
+                    if KEY_RE.fullmatch(key) and isinstance(origin, list) and len(origin) == 2
+                    and all(type(coord) is int and 0 <= coord <= limit
+                            for coord, limit in zip(origin, (224, 240)))
+                }
         self.index = {'version': 1, 'skins': {}, 'players': {}, 'heads': {}}
         path = safe_path(self.folder / 'index.json')
         if path.exists():
@@ -296,7 +358,14 @@ class SkinCatalogue:
     def _save(self):
         write_atomic(self.folder / 'index.json', json_bytes(self.index))
 
-    def capture(self, xuid, image, head_id=None):
+    def render_pixels(self, key):
+        raw = self.read_pixels(key)
+        origin = self._persona_origins.get(key)
+        if origin is not None and len(raw) == 256 * 256 * 4:
+            return remap_head_atlas(raw, origin)
+        return raw
+
+    def capture(self, xuid, image, head_id=None, *, character_creator=False, static_snapshot=None):
         xuid = normalize_xuid(xuid)
         if head_id is not None:
             from uuid import UUID
@@ -306,8 +375,26 @@ class SkinCatalogue:
                 raise ValueError('skin_head_catalogue_full')
         if xuid not in self.index['players'] and len(self.index['players']) >= MAX_HEADS:
             raise ValueError('skin_player_catalogue_full')
-        width, height, raw = image_snapshot(image)
+        width, height, raw = image_snapshot(image, allow_placeholder=static_snapshot is not None)
+        if static_snapshot is not None:
+            source_digest, static_pixels = static_snapshot
+            if hashlib.sha256(raw).digest() == source_digest:
+                if (width, height) == (1, 1) and len(static_pixels) == 64 * 64 * 4:
+                    width = height = 64
+                if len(static_pixels) == width * height * 4:
+                    raw = static_pixels
+                    character_creator = False
+        if (width, height) not in SIZES:
+            raise ValueError('invalid_skin_image')
         key = hashlib.sha256(struct.pack('>II', width, height) + raw).hexdigest()
+        origin = self._persona_origins.get(key)
+        if origin is not None and width == height == 256:
+            remap_head_atlas(raw, origin)
+        elif character_creator or not classic_head_atlas(width, raw):
+            if width != 256 or height != 256 or not matches_padded_persona_head(raw):
+                raise ValueError('unsupported_head_atlas')
+            raw = remap_head_atlas(raw, (1, 1))
+            key = hashlib.sha256(struct.pack('>II', width, height) + raw).hexdigest()
         updated = {section: dict(value) if isinstance(value, dict) else value for section, value in self.index.items()}
         if key not in self.index['skins']:
             if len(self.index['skins']) >= MAX_SKINS:
@@ -359,7 +446,7 @@ class SkinCatalogue:
             assets['resource'][f'models/blocks/head_{width}_{height}.geo.json'] = json_bytes(geometry_document(width, height))
             assets['resource'][f'models/entity/head_worn_{width}_{height}.geo.json'] = json_bytes(wearable_geometry_document(width, height))
             assets['resource']['attachables/' + key + '.json'] = json_bytes(attachable_document(key, width, height))
-            pixels = head_pixels(width, height, self.read_pixels(key))
+            pixels = head_pixels(width, height, self.render_pixels(key))
             assets['resource']['textures/blocks/' + key + '.png'] = png_rgba(width, height, pixels)
             textures['kmhead_' + key] = {'textures': 'textures/blocks/' + key}
             blocks[custom_type(key)] = {'sound': 'stone'}

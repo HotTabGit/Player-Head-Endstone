@@ -5,11 +5,12 @@ import math
 from struct import pack, unpack
 from uuid import uuid4
 
-from .skins import SIZES, geometry_document, head_pixels
+from .skins import SIZES, classic_head_atlas, head_pixels
 
 
 PROTOCOL = 2225
 ADD_PLAYER, REMOVE_ACTOR, BLOCK_ACTOR_DATA, PLAYER_LIST = 12, 14, 56, 63
+PLAYER_SKIN = 93
 DISTANCE, MAX_VISIBLE, MAX_NEW = 24, 12, 2
 
 
@@ -99,18 +100,48 @@ def skull_rotation(payload):
 def serialize_skin(key, width, height, pixels, version):
     if (width, height) not in SIZES or len(pixels) != width * height * 4:
         raise ValueError("invalid live skin")
-    if height < width:
-        pixels = pixels.ljust(width * width * 4, b"\0")
-        height = width
-    geometry = geometry_document(width, height)
-    name = f"geometry.kmheads.live_layers_{width}_{height}"
-    geometry["minecraft:geometry"][0]["description"]["identifier"] = name
-    skin_id = "kmheads:layers:" + key
+    scale = width // 64
+    if scale == 1:
+        pixels = head_pixels(64, 64, pixels)
+    else:
+        rows = []
+        for y in range(16):
+            row = y * scale * width * 4
+            rows.append(b"".join(pixels[row + x * scale * 4:row + x * scale * 4 + 4] for x in range(64)))
+        pixels = b"".join(rows).ljust(64 * 64 * 4, b"\0")
+    top = [pixels[(y * 64 + 8) * 4:(y * 64 + 16) * 4] for y in range(8)]
+    bottom = [(y * 64 + 16) * 4 for y in range(8)]
+    if all(row[3::4] == b"\xff" * 8 for row in top) and not any(
+            alpha for start in bottom for alpha in pixels[start + 3:start + 32:4]):
+        pixels = bytearray(pixels)
+        for start, row in zip(bottom, top):
+            pixels[start:start + 32] = row
+    pixels = bytearray(pixels)
+    for y in range(8):
+        for x in (16, 48):
+            start = (y * 64 + x) * 4
+            target = ((y + 32) * 64 + x) * 4
+            pixels[target:target + 32] = pixels[start:start + 32]
+            pixels[start:start + 32] = bytes(32)
+    name = "geometry.kmheads.live_skull"
+    geometry = {"format_version": "1.10.0", name: {
+        "texturewidth": 64, "textureheight": 64, "visible_bounds_width": 2,
+        "visible_bounds_height": 1, "visible_bounds_offset": [0, 0, 0],
+        "bones": [
+            {"name": "head", "pivot": [0, 24, 0], "cubes": [
+                {"origin": [-4, 0, -4], "size": [8, 8, 8], "uv": [0, 0]},
+                {"origin": [-4, -.125, -4], "size": [8, 1, 8], "uv": [0, 32]}]},
+            {"name": "hat", "parent": "head", "pivot": [0, 24, 0], "cubes": [
+                {"origin": [-4, 0, -4], "size": [8, 8, 8], "uv": [32, 0], "inflate": 0.5},
+                {"origin": [-4, -.125, -4], "size": [8, 1, 8], "uv": [32, 32], "inflate": 0.5}]},
+        ],
+    }}
+    skin_id = "kmheads:skull:v6:" + key
     return b"".join((
         field(skin_id), field(json.dumps({"geometry": {"default": name}})),
-        pack("<II", width, height), field(head_pixels(width, height, pixels)),
+        pack("<II", 64, 64), field(pixels),
         bytes(10), field(json.dumps(geometry)), field(version), bytes(2),
-        field(skin_id), bytes(7), b"\x01" + bytes(4), field("True"), b"\0",
+        field(skin_id), bytes(7), b"\x01\x00\x00\x00\x01", field("True"), b"\0",
     ))
 
 
@@ -169,7 +200,10 @@ class LiveSkins:
     @lru_cache(maxsize=32)
     def skin_bytes(self, skins, key, version):
         info = skins.index["skins"][key]
-        return serialize_skin(key, info["width"], info["height"], skins.read_pixels(key), version)
+        pixels = skins.render_pixels(key)
+        if not classic_head_atlas(info["width"], pixels):
+            return None
+        return serialize_skin(key, info["width"], info["height"], pixels, version)
 
     def update(self, plugin, vanilla, type_name):
         if plugin.server.protocol_version != PROTOCOL:
@@ -223,6 +257,8 @@ class LiveSkins:
         for position, state in pending[:MAX_NEW]:
             key, xyz, yaw = state
             skin = self.skin_bytes(skins, key, player.game_version)
+            if skin is None:
+                continue
             identity = wire_uuid(uuid4())
             entity = next(self.ids)
             player.send_packet(PLAYER_LIST, add_list_entry(identity, entity, skin))

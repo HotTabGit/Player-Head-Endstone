@@ -199,7 +199,7 @@ class FakePlugin:
 
 def load_adapter():
     names = ["ActorExplodeEvent", "BlockBreakEvent", "BlockExplodeEvent", "BlockPlaceEvent",
-             "BlockPistonExtendEvent", "BlockPistonRetractEvent", "PlayerDeathEvent", "PlayerQuitEvent", "PlayerJoinEvent", "PlayerSkinChangeEvent", "PacketSendEvent"]
+             "BlockPistonExtendEvent", "BlockPistonRetractEvent", "PlayerDeathEvent", "PlayerQuitEvent", "PlayerJoinEvent", "PlayerSkinChangeEvent", "PacketSendEvent", "PacketReceiveEvent"]
     events = types.ModuleType("endstone.event")
     for name in names:
         setattr(events, name, type(name, (), {}))

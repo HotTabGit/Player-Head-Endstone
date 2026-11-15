@@ -1,4 +1,4 @@
-name: Publish Player Heads 1.3.1
+name: Publish Player Heads 1.3.2
 on:
   push:
     branches: [main]
@@ -23,13 +23,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          [ "$version" = "1.3.1" ] || exit 0
+          [ "$version" = "1.3.2" ] || exit 0
           if gh release view "v$version" >/dev/null 2>&1; then
             exit 0
           fi
           asset="endstone_player_heads-$version-py3-none-any.whl"
           cat > /tmp/player-heads-notes.md <<'EOF'
-          Плагин сам заполняет пустые списки паков мира. Если JSON повреждён, в логе теперь видно имя файла и место ошибки.
+          - Исправлен низ головы при мгновенной отрисовке и через ресурс-пак.
+          - Головы в инвентаре по размеру близки к ванильным и повёрнуты лицом вправо.
+          - Добавлена поддержка совместимых скинов Persona 256×256, включая второй слой, если он есть в модели.
 
           Endstone 0.11.15, Bedrock 26.60. Положи .whl в plugins и перезапусти сервер. При обновлении сохрани plugins/player_heads.
           EOF

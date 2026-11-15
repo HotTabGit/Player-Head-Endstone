@@ -43,6 +43,57 @@ class SkinTests(unittest.TestCase):
     def refs(self, kind):
         return json.loads((self.world / f'world_{kind}_packs.json').read_text())
 
+    def test_character_creator_atlas_is_not_saved_as_head(self):
+        image = Image(width=256, height=256)
+        pixels = bytearray(image.raw)
+        for y in range(32, 64):
+            for x in range(64):
+                pixels[(y * 256 + x) * 4 + 3] = 0
+        image.raw = bytes(pixels)
+        with self.assertRaisesRegex(ValueError, 'unsupported_head_atlas'):
+            self.catalogue.capture('123', image)
+        self.assertEqual(self.catalogue.index['skins'], {})
+
+    def test_known_persona_atlas_remaps_only_the_six_head_faces(self):
+        image = Image(width=256, height=256)
+        pixels = bytearray(256 * 256 * 4)
+        faces = ((8, 0), (16, 0), (0, 8), (8, 8), (16, 8), (24, 8))
+        for color, (x, y) in enumerate(faces, 1):
+            for row in range(8):
+                offset = ((y + row + 1) * 256 + x + 1) * 4
+                pixels[offset:offset + 32] = bytes((color, 0, 0, 255)) * 8
+        image.raw = bytes(pixels)
+        key = hashlib.sha256(struct.pack('>II', 256, 256) + image.raw).hexdigest()
+        folder = self.folder / 'skins'
+        folder.mkdir(parents=True)
+        (folder / 'persona-atlases.json').write_text(json.dumps({key: [1, 1]}))
+        catalogue = skins.SkinCatalogue(self.folder)
+        self.assertEqual(catalogue.capture('123', image, character_creator=True), key)
+        self.assertEqual(catalogue.read_pixels(key), image.raw)
+        remapped = catalogue.render_pixels(key)
+        for color, (x, y) in enumerate(faces, 1):
+            offset = (y * 4 * 256 + x * 4) * 4
+            self.assertEqual(remapped[offset:offset + 128], bytes((color, 0, 0, 255)) * 32)
+        self.assertEqual(remapped[:128], bytes(128))
+
+    def test_new_persona_is_recognized_only_with_matching_padding(self):
+        image = Image(width=256, height=256)
+        pixels = bytearray(256 * 256 * 4)
+        color = bytes((129, 201, 64, 255))
+        for row in range(17):
+            left, right = (9, 25) if row < 9 else (0, 34)
+            start = (256 * row + left) * 4
+            pixels[start:start + (right - left) * 4] = color * (right - left)
+        image.raw = bytes(pixels)
+        key = self.catalogue.capture('123', image, character_creator=True)
+        self.assertNotIn(key, self.catalogue.startup_keys)
+        self.assertEqual(self.catalogue.render_pixels(key)[:4], bytes(4))
+        self.assertTrue(skins.classic_head_atlas(256, self.catalogue.render_pixels(key)))
+        pixels[9 * 256 * 4] ^= 1
+        image.raw = bytes(pixels)
+        with self.assertRaisesRegex(ValueError, 'unsupported_head_atlas'):
+            self.catalogue.capture('123', image, character_creator=True)
+
     def test_empty_world_pack_files_are_initialized(self):
         (self.world / 'world_behavior_packs.json').write_bytes(b'')
         (self.world / 'world_resource_packs.json').write_bytes(b'\xef\xbb\xbf \n')

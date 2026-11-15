@@ -12,7 +12,7 @@ from endstone.block import BlockFace
 from endstone.event import (
     ActorExplodeEvent, BlockBreakEvent, BlockExplodeEvent, BlockPlaceEvent,
     BlockPistonExtendEvent, BlockPistonRetractEvent, EventPriority,
-    PacketSendEvent, PlayerDeathEvent, PlayerQuitEvent, PlayerJoinEvent, PlayerSkinChangeEvent, event_handler,
+    PacketReceiveEvent, PacketSendEvent, PlayerDeathEvent, PlayerQuitEvent, PlayerJoinEvent, PlayerSkinChangeEvent, event_handler,
 )
 from endstone.inventory import ItemStack
 from endstone.level import Location
@@ -20,7 +20,7 @@ from endstone.permissions import PermissionDefault
 from endstone.plugin import Plugin
 
 from .config import ConfigError, Settings, load_settings
-from .live_skin import BLOCK_ACTOR_DATA, PLAYER_LIST, PROTOCOL, LiveSkins, skull_rotation, wire_uuid
+from .live_skin import BLOCK_ACTOR_DATA, PLAYER_LIST, PLAYER_SKIN, PROTOCOL, LiveSkins, skull_rotation, wire_uuid
 from .model import NBT_KEY, HeadData, make_head_data, make_head_tag, read_head_nbt, head_display_name, head_lore, should_drop
 from .store import MAX_RECORDS, HeadStoreError, NbtHeadStore
 from .skins import LIVE_HEAD, SkinCatalogue, SkinJsonError, custom_type, is_custom_type, capture_failure, write_atomic, json_bytes
@@ -133,7 +133,15 @@ class PlayerHeadsPlugin(Plugin):
             self._skin_diagnostics['attempts'] += 1
             current = player.skin if skin is None else skin
             image = current.image
-            self._skins.capture(str(player.xuid), image, head_id)
+            options = {}
+            if 'persona' in str(getattr(current, 'id', '')).casefold():
+                options['character_creator'] = True
+            identity = getattr(player, 'unique_id', None)
+            if identity is not None:
+                previous = self._worn_skins.snapshots.get(wire_uuid(identity))
+                if previous is not None and previous[1] is not None:
+                    options['static_snapshot'] = previous[1]
+            self._skins.capture(str(player.xuid), image, head_id, **options)
             self._skin_diagnostics['successes'] += 1
             self._skin_diag_dirty = True
             return True
@@ -147,6 +155,7 @@ class PlayerHeadsPlugin(Plugin):
                 records[signature] = {**detail, 'count': 1}
             self._skin_diag_dirty = True
             self._skin_last_retryable = (detail['shape'] is None or 0 in detail['shape']
+                                         or detail['shape'] == [1, 1, 4]
                                          or isinstance(error, (OSError, RuntimeError)))
             self._warn('скин не сохранён: ' + json.dumps(detail, ensure_ascii=True, sort_keys=True))
             self._flush_skin_diagnostics()
@@ -282,7 +291,18 @@ class PlayerHeadsPlugin(Plugin):
     @event_handler(priority=EventPriority.MONITOR, ignore_cancelled=True)
     def on_skin_change(self, event: PlayerSkinChangeEvent):
         if self.ready and self._main() and not event.is_cancelled:
-            self._capture_skin(event.player, skin=event.new_skin, context='skin_change')
+            packet = None
+            if getattr(self.server, "protocol_version", None) == PROTOCOL:
+                identity = wire_uuid(event.player.unique_id)
+                address = event.player.address
+                packet = self._worn_skins.accept_pending(identity, (address.hostname, address.port))
+            captured = self._capture_skin(event.player, skin=event.new_skin, context='skin_change')
+            if not captured and self._skin_last_retryable:
+                self._queue_skin_retry(event.player)
+            if not captured and packet is not None:
+                _, visuals, persona = packet
+                self._warn(f'пакет скина: {visuals[2]}×{visuals[3]}, Persona={bool(persona)}, '
+                           f'лицевых кадровых текстур={len(visuals[6])}, байт модели={len(visuals[7])}')
             if getattr(self.server, "protocol_version", None) == PROTOCOL:
                 self._worn_skins.skin_changed(event.player)
 
@@ -869,14 +889,23 @@ class PlayerHeadsPlugin(Plugin):
                 self._warn("не удалось обновить скин надетой головы")
 
     @event_handler(priority=EventPriority.MONITOR, ignore_cancelled=True)
+    def on_skin_packet(self, event: PacketReceiveEvent):
+        if event.packet_id == PLAYER_SKIN and self.ready:
+            address = event.address
+            self._worn_skins.queue_change(event.payload, (address.hostname, address.port))
+
+    @event_handler(priority=EventPriority.MONITOR, ignore_cancelled=True)
     def on_head_packet(self, event: PacketSendEvent):
-        if event.packet_id not in (BLOCK_ACTOR_DATA, PLAYER_LIST) or not self._main() or not self.ready:
+        if event.packet_id not in (BLOCK_ACTOR_DATA, PLAYER_LIST, PLAYER_SKIN) or not self._main() or not self.ready:
             return
         if self.server.protocol_version != PROTOCOL or event.player is None:
             return
         try:
             if event.packet_id == PLAYER_LIST:
                 self._worn_skins.observe(wire_uuid(event.player.unique_id), event.payload)
+                return
+            if event.packet_id == PLAYER_SKIN:
+                self._worn_skins.observe_change(event.payload)
                 return
             result = skull_rotation(event.payload)
             if result is None:
@@ -952,7 +981,7 @@ class PlayerHeadsPlugin(Plugin):
     def _give(self, sender, victim):
         receiver = sender if isinstance(sender, Player) else victim
         data = make_head_data(victim.xuid, victim.name)
-        self._capture_skin(victim, data.head_id, context='give')
+        captured = self._capture_skin(victim, data.head_id, context='give')
         item = self.make_item(data)
         leftovers = receiver.inventory.add_item(item)
         for remaining in leftovers.values():
@@ -961,6 +990,8 @@ class PlayerHeadsPlugin(Plugin):
                 sender.send_message("§cИнвентарь заполнен, и сервер не смог положить голову рядом.")
                 return
         sender.send_message(f"§aВыдана голова {data.victim_name}." + (" Предмет выпал рядом." if leftovers else ""))
+        if not captured:
+            sender.send_message("§eКлиент не передал текстуру, которую можно использовать для этой головы.")
 
     def on_command(self, sender, command, args):
         if command.name != "heads":

@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from pathlib import Path
 from struct import pack, unpack
 import sys
@@ -16,28 +17,96 @@ from endstone_player_heads.worn_skin import WornSkins, merged_entry, roster_entr
 
 
 class LiveSkinTests(unittest.TestCase):
+    def test_skin_change_captures_first_face_frame_without_animation(self):
+        identity = bytes(16)
+        base = bytes((5, 10, 15, 255)) * (64 * 64)
+        first = bytes((21, 31, 41, 255)) * (32 * 16)
+        second = bytes((51, 61, 71, 255)) * (32 * 16)
+        skin = (field("animated") + field("") + pack("<II", 64, 64) + field(base)
+                + b"\x01" + pack("<II", 32, 32) + field(first + second)
+                + b"\x01" + pack("<f", 2) + b"\0" + bytes(28))
+        packets = WornSkins()
+        packets.queue_change(identity + skin + b"\0\0", ("127.0.0.1", 19132))
+        self.assertIsNone(packets.accept_pending(identity, ("127.0.0.1", 19133)))
+        self.assertIsNotNone(packets.accept_pending(identity, ("127.0.0.1", 19132)))
+        digest, image = packets.snapshots[identity][1]
+        self.assertEqual(digest, sha256(base).digest())
+        self.assertEqual(image[:128], first[:128])
+        self.assertNotIn(second[:4], image)
+
+    def test_placeholder_is_usable_when_face_frame_contains_a_complete_head(self):
+        identity = bytes(16)
+        base = bytes(4)
+        first = bytes((21, 31, 41, 255)) * (32 * 16)
+        skin = (field("animated") + field("") + pack("<II", 1, 1) + field(base)
+                + b"\x01" + pack("<II", 32, 16) + field(first)
+                + b"\x01" + pack("<f", 1) + b"\0" + bytes(28))
+        packets = WornSkins()
+        packets.observe_change(identity + skin + b"\0\0")
+        digest, image = packets.snapshots[identity][1]
+        self.assertEqual(digest, sha256(base).digest())
+        self.assertEqual(image[:128], first[:128])
+        self.assertEqual(len(image), 64 * 64 * 4)
+
+    def test_persona_roster_captures_both_layers_with_bottom_face(self):
+        identity = bytes(16)
+        base = bytes((5, 10, 15, 255)) * (256 * 256)
+        atlas = bytearray(base)
+        offset = (24 * 256 + 80) * 4
+        atlas[offset:offset + 4] = b"\x40\x50\x60\x80"
+        patch = {"geometry": {"default": "persona.example"}}
+        geometry = {"persona.example": {"texturewidth": 256, "textureheight": 256, "bones": [
+            {"name": "head", "cubes": [{"origin": [-4, 24, -4], "size": [8, 8, 8], "uv": [0, 24]}]},
+            {"name": "hat", "parent": "head", "cubes": [{"origin": [-4, 24, -4], "size": [8, 8, 8],
+                "uv": {"down": {"uv": [80, 24], "uv_size": [8, 8]}}}]},
+        ]}}
+        skin = (field("persona") + field(json.dumps(patch)) + pack("<II", 256, 256) + field(atlas)
+                + bytes(10) + field(json.dumps(geometry)) + bytes(12) + b"\x01" + bytes(5))
+        packets = WornSkins()
+        packets.observe(identity, add_list_entry(identity, 19, skin))
+        _, image = packets.snapshots[identity][1]
+        reader = PacketReader(serialize_skin("sample", 256, 256, image, "1.26.60"))
+        reader.blob()
+        reader.blob()
+        reader.take(8)
+        rendered = reader.blob()
+        self.assertEqual(rendered[16 * 4:17 * 4], bytes(4))
+        self.assertEqual(rendered[48 * 4:49 * 4], bytes(4))
+        offset = (32 * 64 + 16) * 4
+        self.assertEqual(rendered[offset:offset + 4], base[:4])
+        offset = (32 * 64 + 48) * 4
+        self.assertEqual(rendered[offset:offset + 4], b"\x40\x50\x60\x80")
+
     def test_live_skin_preserves_alpha_and_uv_for_both_layers(self):
         for width in (64, 128):
             with self.subTest(width=width):
                 scale = width // 64
                 pixels = bytearray(width * width * 4)
-                for x, rgba in ((8, b"\xcc\x33\x11\xff"), (40, b"\x55\x66\x77\x80")):
+                expected = bytearray(64 * 64 * 4)
+                for x, rgba in ((8, b"\xcc\x33\x11\xbf"), (40, b"\x55\x66\x77\x80")):
                     index = (8 * scale * width + x * scale) * 4
                     pixels[index:index + 4] = rgba
+                    output_index = (8 * 64 + x) * 4
+                    expected[output_index:output_index + 4] = rgba
                 reader = PacketReader(serialize_skin("key", width, width, bytes(pixels), "1.26.60"))
-                self.assertTrue(reader.blob().startswith(b"kmheads:layers:"))
+                self.assertTrue(reader.blob().startswith(b"kmheads:skull:"))
                 patch = json.loads(reader.blob())
-                self.assertEqual(unpack("<II", reader.take(8)), (width, width))
-                self.assertEqual(reader.blob(), bytes(pixels))
+                self.assertEqual(unpack("<II", reader.take(8)), (64, 64))
+                self.assertEqual(reader.blob(), bytes(expected))
                 reader.take(10)
-                geometry = json.loads(reader.blob())["minecraft:geometry"][0]
-                self.assertEqual(patch["geometry"]["default"], geometry["description"]["identifier"])
+                document = json.loads(reader.blob())
+                self.assertEqual(document["format_version"], "1.10.0")
+                geometry = document[patch["geometry"]["default"]]
                 head, hat = geometry["bones"]
+                self.assertEqual([head["name"], hat["name"]], ["head", "hat"])
                 self.assertEqual(hat["parent"], head["name"])
                 self.assertGreater(hat["cubes"][0]["inflate"], 0)
-                for bone, x in ((head, 8), (hat, 40)):
-                    self.assertEqual(bone["cubes"][0]["uv"]["north"],
-                                     {"uv": [x * scale, 8 * scale], "uv_size": [8 * scale] * 2})
+                self.assertEqual(head["cubes"][0]["uv"], [0, 0])
+                self.assertEqual(hat["cubes"][0]["uv"], [32, 0])
+                for bone in (head, hat):
+                    main, bottom = bone["cubes"]
+                    self.assertEqual(main["origin"][1] - bottom["origin"][1], .125)
+                    self.assertEqual(bottom["uv"], [main["uv"][0], 32])
 
     def test_wearer_gets_original_pixels_back_after_removal_and_can_equip_again(self):
         packets = []
@@ -51,7 +120,7 @@ class LiveSkinTests(unittest.TestCase):
                                  send_packet=lambda kind, payload: packets.append((kind, payload)))
         manager = SimpleNamespace(get_plugin=lambda name: None)
         skins = SimpleNamespace(index={"skins": {"key": {"width": 64}}}, key_for=lambda data: "key",
-                                read_pixels=lambda key: b"h" * 16384)
+                                render_pixels=lambda key: b"h" * 16384)
         plugin = SimpleNamespace(server=SimpleNamespace(online_players=[player], plugin_manager=manager),
                                  _item_data=lambda item: item, _skins=skins)
         worn = WornSkins()
@@ -81,6 +150,7 @@ class LiveSkinTests(unittest.TestCase):
         payload += b"\x05" + field("Rotation") + pack("<f", 67.5) + b"\x00"
         self.assertEqual(skull_rotation(payload), (position, 67.5))
         self.assertEqual(appearance(("Overworld", *position), {"facing_direction": 1}, 67.5)[1], 247.5)
+        self.assertAlmostEqual(appearance(("Overworld", *position), {"facing_direction": 1}, 67.5)[0][1], 70)
         self.assertEqual(appearance(("Overworld", *position), {"facing_direction": 2}, 67.5)[1], 180)
 
     def test_worn_skin_only_changes_head_pixels_and_preserves_model(self):
@@ -122,7 +192,7 @@ class LiveSkinTests(unittest.TestCase):
         class Skins:
             index = {"skins": {key: {"width": 64, "height": 64}}}
 
-            def read_pixels(self, key):
+            def render_pixels(self, key):
                 return pixels
 
         skins = Skins()

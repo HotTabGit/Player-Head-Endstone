@@ -44,6 +44,12 @@ class VisualPackTests(unittest.TestCase):
             with self.subTest(width=width, height=height):
                 block = skins.geometry_document(width, height)['minecraft:geometry'][0]
                 worn = skins.wearable_geometry_document(width, height)['minecraft:geometry'][0]
+                scale = width // 64
+                self.assertEqual(set(block['item_display_transforms']), {'gui'})
+                self.assertNotIn('item_display_transforms', worn)
+                for bone, x in zip(block['bones'], (24, 56)):
+                    self.assertEqual(bone['cubes'][0]['uv']['down'],
+                                     {'uv': [x * scale, 8 * scale], 'uv_size': [-8 * scale, -8 * scale]})
                 self.assertNotEqual(block['description']['identifier'], worn['description']['identifier'])
                 self.assertEqual(worn['bones'][0]['name'], 'head')
                 self.assertEqual(worn['bones'][0]['pivot'], [0, 24, 0])
