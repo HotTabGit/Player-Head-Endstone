@@ -199,7 +199,7 @@ class FakePlugin:
 
 def load_adapter():
     names = ["ActorExplodeEvent", "BlockBreakEvent", "BlockExplodeEvent", "BlockPlaceEvent",
-             "BlockPistonExtendEvent", "BlockPistonRetractEvent", "PlayerDeathEvent", "PlayerQuitEvent", "PlayerJoinEvent", "PlayerSkinChangeEvent"]
+             "BlockPistonExtendEvent", "BlockPistonRetractEvent", "PlayerDeathEvent", "PlayerQuitEvent", "PlayerJoinEvent", "PlayerSkinChangeEvent", "PacketSendEvent"]
     events = types.ModuleType("endstone.event")
     for name in names:
         setattr(events, name, type(name, (), {}))
@@ -338,6 +338,20 @@ class AdapterTests(unittest.TestCase):
         name = 'endstone_inventoryui.manager.player_manager'
         with patch.dict(sys.modules, {name: types.SimpleNamespace(find_session=lambda player: object())}):
             self.plugin._upgrade_inventory_heads()
+
+    def test_beta6_head_recovers_without_changing_signed_identity(self):
+        from endstone_player_heads.skins import LIVE_HEAD
+        item = self.plugin.make_item(self.data)
+        item.type.id = LIVE_HEAD
+        slots = [item]
+        self.player.inventory = types.SimpleNamespace(
+            size=1, helmet=None, item_in_off_hand=None, get_item=slots.__getitem__,
+            set_item=slots.__setitem__)
+        self.plugin.server.online_players = [self.player]
+        self.plugin._live_item_registered = True
+        self.plugin._upgrade_inventory_heads()
+        self.assertEqual(slots[0].type.id, 'minecraft:player_head')
+        self.assertEqual(self.plugin._item_data(slots[0]), self.data)
 
     def test_only_authenticated_online_session_supplies_skin(self):
         calls = []
