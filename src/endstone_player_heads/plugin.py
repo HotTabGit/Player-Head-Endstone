@@ -23,7 +23,7 @@ from .config import ConfigError, Settings, load_settings
 from .live_skin import BLOCK_ACTOR_DATA, PLAYER_LIST, PROTOCOL, LiveSkins, skull_rotation, wire_uuid
 from .model import NBT_KEY, HeadData, make_head_data, make_head_tag, read_head_nbt, head_display_name, head_lore, should_drop
 from .store import MAX_RECORDS, HeadStoreError, NbtHeadStore
-from .skins import LIVE_HEAD, SkinCatalogue, custom_type, is_custom_type, capture_failure, write_atomic, json_bytes
+from .skins import LIVE_HEAD, SkinCatalogue, SkinJsonError, custom_type, is_custom_type, capture_failure, write_atomic, json_bytes
 from .worn_skin import WornSkins
 
 
@@ -119,7 +119,8 @@ class PlayerHeadsPlugin(Plugin):
             self._skin_pack_version = self._skins.build_packs(folder.parent.parent)
         except Exception as exc:
             self._skins = None
-            self.logger.warning('PlayerHeads skins: preparation failed (' + type(exc).__name__ + '); signed heads remain available.')
+            detail = str(exc) if isinstance(exc, SkinJsonError) else type(exc).__name__
+            self.logger.warning('PlayerHeads: ошибка подготовки скинов (' + detail + ').')
 
     def _capture_skin(self, player, head_id=None, skin=None, context='other'):
         self._skin_last_retryable = False

@@ -43,6 +43,21 @@ class SkinTests(unittest.TestCase):
     def refs(self, kind):
         return json.loads((self.world / f'world_{kind}_packs.json').read_text())
 
+    def test_empty_world_pack_files_are_initialized(self):
+        (self.world / 'world_behavior_packs.json').write_bytes(b'')
+        (self.world / 'world_resource_packs.json').write_bytes(b'\xef\xbb\xbf \n')
+        self.catalogue.build_packs(self.root)
+        self.assertEqual([ref['pack_id'] for ref in self.refs('behavior')], [skins.BP_UUID])
+        self.assertEqual([ref['pack_id'] for ref in self.refs('resource')], [skins.RP_UUID])
+
+    def test_invalid_json_names_file_and_is_left_intact(self):
+        path = self.world / 'world_resource_packs.json'
+        path.write_bytes(b'{broken')
+        with self.assertRaisesRegex(skins.SkinJsonError, r'world_resource_packs\.json.*строка 1'):
+            self.catalogue.build_packs(self.root)
+        self.assertEqual(path.read_bytes(), b'{broken')
+        self.assertFalse((self.root / 'behavior_packs').exists())
+
     def test_capture_restart_publishes_new_version_and_preserves_other_refs(self):
         self.assertEqual(self.catalogue.build_packs(self.root), [1, skins.PACK_ASSET_REVISION, 0])
         data = make_head_data('123', 'Victim')

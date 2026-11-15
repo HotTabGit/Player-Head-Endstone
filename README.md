@@ -8,7 +8,7 @@
 
 ## Установка
 
-1. Останови сервер и положи [Player Heads 1.3.0](https://github.com/HotTabGit/Player-Head-Endstone/releases/download/v1.3.0/endstone_player_heads-1.3.0-py3-none-any.whl) в `plugins`.
+1. Останови сервер и положи [Player Heads 1.3.1](https://github.com/HotTabGit/Player-Head-Endstone/releases/download/v1.3.1/endstone_player_heads-1.3.1-py3-none-any.whl) в `plugins`.
 2. При обновлении убери прежний `.whl` и сохрани `plugins/player_heads`.
 3. Запусти сервер и прими ресурспак при входе.
 

@@ -86,6 +86,22 @@ def json_bytes(value):
     return (json.dumps(value, ensure_ascii=True, indent=2) + '\n').encode('utf-8')
 
 
+class SkinJsonError(ValueError):
+    pass
+
+
+def decode_skin_json(raw, path, *, empty_pack_list=False):
+    try:
+        text = raw.decode('utf-8-sig')
+        if empty_pack_list and not text.strip():
+            return []
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise SkinJsonError(f'{path}: {exc.msg}, строка {exc.lineno}, столбец {exc.colno}') from exc
+    except UnicodeDecodeError as exc:
+        raise SkinJsonError(f'{path}: ожидается UTF-8') from exc
+
+
 def png_rgba(width, height, pixels):
     if (width, height) not in SIZES or type(pixels) is not bytes or len(pixels) != width * height * 4:
         raise ValueError('invalid_skin_image')
@@ -244,7 +260,7 @@ class SkinCatalogue:
         if path.exists():
             if path.stat().st_size > MAX_INDEX_BYTES:
                 raise ValueError('skin_index_too_large')
-            index = json.loads(path.read_text(encoding='utf-8'))
+            index = decode_skin_json(path.read_bytes(), 'plugins/player_heads/skins/index.json')
             if not isinstance(index, dict) or set(index) != set(self.index) or index['version'] != 1:
                 raise ValueError('invalid_skin_index')
             for section, cap in [('skins', MAX_SKINS), ('players', MAX_HEADS), ('heads', MAX_HEADS)]:
@@ -356,7 +372,8 @@ class SkinCatalogue:
             pack = safe_path(server_root / (kind + '_packs') / PACK_NAME)
             existing = pack / 'manifest.json'
             if pack.exists():
-                if not existing.is_file() or json.loads(existing.read_text(encoding='utf-8'))['header']['uuid'] != (BP_UUID if kind == 'behavior' else RP_UUID):
+                if not existing.is_file() or decode_skin_json(
+                        existing.read_bytes(), existing.relative_to(server_root))['header']['uuid'] != (BP_UUID if kind == 'behavior' else RP_UUID):
                     raise ValueError('refuse_foreign_head_pack')
             for path, raw in files.items():
                 changes[safe_path(pack / path)] = raw
@@ -368,7 +385,7 @@ class SkinCatalogue:
                 if path.exists() and not path.is_file():
                     raise ValueError('invalid_world_pack_ref_file')
                 raw = path.read_bytes() if path.is_file() else None
-                refs = json.loads(raw) if raw is not None else []
+                refs = decode_skin_json(raw, path.relative_to(server_root), empty_pack_list=True) if raw is not None else []
                 if not isinstance(refs, list) or any(not isinstance(ref, dict) or not isinstance(ref.get('pack_id'), str) for ref in refs):
                     raise ValueError('invalid_world_pack_refs')
                 matches = [ref for ref in refs if ref['pack_id'] == uid]
