@@ -16,7 +16,8 @@ RP_UUID = 'ec88c1a7-7606-4324-a11d-182e81c06a29'
 BP_MODULE = '76745b77-d288-4a8c-956b-319775ff9640'
 RP_MODULE = '7f743eb9-fc27-4669-8bc2-56095394581c'
 PACK_NAME = 'kartexmine_player_heads'
-PACK_ASSET_REVISION = 2
+PACK_ASSET_REVISION = 6
+LIVE_HEAD = 'kartexheads:live_head'
 MAX_SKINS = 512
 MAX_HEADS = 8192
 MAX_INDEX_BYTES = 3 * 1024 * 1024
@@ -152,17 +153,22 @@ def geometry_document(width, height):
         'description': {'identifier': f'geometry.kartexheads.head_{width}_{height}',
                         'texture_width': width, 'texture_height': height,
                         'visible_bounds_width': 2, 'visible_bounds_height': 2, 'visible_bounds_offset': [0, .5, 0]},
-        'bones': [{'name': 'head', 'pivot': [0, 4, 0], 'cubes': [
-            {'origin': [-4, 0, -4], 'size': [8, 8, 8], 'uv': uv(0)},
-            {'origin': [-4, 0, -4], 'size': [8, 8, 8], 'inflate': .25, 'uv': uv(32)}]}]}]}
+        'bones': [
+            {'name': 'head', 'pivot': [0, 4, 0], 'cubes': [
+                {'origin': [-4, 0, -4], 'size': [8, 8, 8], 'uv': uv(0)}]},
+            {'name': 'hat', 'parent': 'head', 'pivot': [0, 4, 0], 'cubes': [
+                {'origin': [-4, 0, -4], 'size': [8, 8, 8], 'inflate': .5, 'uv': uv(32)}]},
+        ]}]}
 
 
 def block_document(key, width, height):
     texture = 'kmhead_' + key
     components = {
         'minecraft:geometry': {'identifier': f'geometry.kartexheads.head_{width}_{height}'},
-        'minecraft:material_instances': {'*': {'texture': texture, 'render_method': 'alpha_test',
-                                              'ambient_occlusion': False, 'face_dimming': False}},
+        'minecraft:material_instances': {
+            '*': {'texture': texture, 'render_method': 'blend',
+                  'ambient_occlusion': False, 'face_dimming': False},
+        },
         'minecraft:collision_box': {'origin': [-4, 0, -4], 'size': [8, 8, 8]},
         'minecraft:selection_box': {'origin': [-4, 0, -4], 'size': [8, 8, 8]},
         'minecraft:destructible_by_mining': {'seconds_to_destroy': .5},
@@ -196,6 +202,14 @@ def item_document(key):
             'minecraft:wearable': {'slot': 'slot.armor.head', 'protection': 0}}}}
 
 
+def live_item_document():
+    return {'format_version': '1.21.100', 'minecraft:item': {
+        'description': {'identifier': LIVE_HEAD},
+        'components': {
+            'minecraft:block_placer': {'block': 'minecraft:player_head'},
+            'minecraft:wearable': {'slot': 'slot.armor.head', 'protection': 0}}}}
+
+
 def wearable_geometry_document(width, height):
     document = geometry_document(width, height)
     geometry = document['minecraft:geometry'][0]
@@ -203,22 +217,22 @@ def wearable_geometry_document(width, height):
         'identifier': f'geometry.kartexheads.worn_{width}_{height}',
         'visible_bounds_height': 3, 'visible_bounds_offset': [0, 1, 0]})
     head = geometry['bones'][0]
-    head['pivot'] = [0, 24, 0]
-    for cube, inflate in zip(head['cubes'], (.5, .75)):
+    document['format_version'] = '1.16.0'
+    head['binding'] = "'head'"
+    for bone, inflate in zip(geometry['bones'], (.5, .85)):
+        bone['pivot'] = [0, 24, 0]
+        cube = bone['cubes'][0]
         cube['origin'] = [-4, 24, -4]
         cube['inflate'] = inflate
     return document
 
 
 def attachable_document(key, width, height):
-    return {'format_version': '1.10.0', 'minecraft:attachable': {'description': {
+    return {'format_version': '1.20.30', 'minecraft:attachable': {'description': {
         'identifier': custom_type(key),
         'materials': {'default': 'entity_alphatest'},
         'textures': {'default': 'textures/blocks/' + key},
         'geometry': {'default': f'geometry.kartexheads.worn_{width}_{height}'},
-        'animations': {'offset': 'animation.armor.helmet.offset'},
-        'scripts': {'parent_setup': 'variable.helmet_layer_visible = 0.0;',
-                    'animate': ['offset']},
         'render_controllers': ['controller.render.kartexheads.worn']}}}
 
 
@@ -312,6 +326,7 @@ class SkinCatalogue:
                 manifest['dependencies'] = [{'uuid': RP_UUID, 'version': version}]
             assets[kind]['manifest.json'] = json_bytes(manifest)
         assets['behavior']['loot_tables/empty.json'] = json_bytes({'pools': []})
+        assets['behavior']['items/live_head.json'] = json_bytes(live_item_document())
         assets['resource']['render_controllers/head_worn.json'] = json_bytes({
             'format_version': '1.8.0', 'render_controllers': {
                 'controller.render.kartexheads.worn': {

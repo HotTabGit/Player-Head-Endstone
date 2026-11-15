@@ -109,7 +109,7 @@ class SkinTests(unittest.TestCase):
         self.assertEqual(pixels[limit:], bytes(len(pixels) - limit))
         geo = skins.geometry_document(128, 128)['minecraft:geometry'][0]
         self.assertEqual(geo['bones'][0]['cubes'][0]['uv']['north']['uv'], [16, 16])
-        self.assertEqual(geo['bones'][0]['cubes'][1]['uv']['north']['uv'], [80, 16])
+        self.assertEqual(geo['bones'][1]['cubes'][0]['uv']['north']['uv'], [80, 16])
 
     def test_invalid_or_tampered_cache_refused_before_pack_changes(self):
         key = self.catalogue.capture('123', Image())
